@@ -1,175 +1,91 @@
-# main.py
-# SEC Financial API (Enhanced with Full Company Facts)
-# Author: duracle
-# Date: 2025-12-21
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 import requests
-from bs4 import BeautifulSoup
+from typing import Optional
 
-app = FastAPI(
-    title="SEC Financial API (Full Company Facts Version)",
-    description="Fetch all XBRL-reported financial items directly from SEC for each company.",
-    version="2.1"
-)
+app = FastAPI(title="SEC Raw Data Explorer", version="2.2")
 
-# ✅ SEC API 접근용 헤더 (이메일 필수)
 HEADERS = {
-    "User-Agent": "sec-financial-api/1.0 (duracle@gmail.com)",
+    "User-Agent": "Mozilla/5.0 (compatible; FinancialBot/1.0; +mailto:duracle@gmail.com)",
     "Accept-Encoding": "gzip, deflate",
-    "Host": "data.sec.gov",
-    "Referer": "https://www.sec.gov"
+    "Host": "data.sec.gov"
 }
 
-BASE_SEC = "https://data.sec.gov"
-BASE_EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar"
-
-# ----------------------------------------------------------------------------
-# 기본 검색/정보
-# ----------------------------------------------------------------------------
+# 1. 기업 검색 및 CIK 획득
 @app.get("/search")
-def search_companies(q: str):
-    if q.lower() == "nvidia":
-        return {"company_name": "NVIDIA CORP", "ticker": "NVDA", "cik": "0001045810"}
-    elif q.lower() == "apple":
-        return {"company_name": "APPLE INC", "ticker": "AAPL", "cik": "0000320193"}
-    elif q.lower() == "microsoft":
-        return {"company_name": "MICROSOFT CORP", "ticker": "MSFT", "cik": "0000789019"}
-    elif q.lower() == "amazon":
-        return {"company_name": "AMAZON.COM INC", "ticker": "AMZN", "cik": "0001018724"}
-    else:
-        return {"detail": f"No mock data for query {q}"}
-
-@app.get("/company")
-def get_company_info(cik: str):
-    """기업 기본 정보 조회"""
-    url = f"{BASE_SEC}/submissions/CIK{cik.zfill(10)}.json"
-    res = requests.get(url, headers=HEADERS)
-    if res.status_code != 200:
-        raise HTTPException(status_code=res.status_code, detail="Failed to fetch company info")
-    return res.json()
-
-# ----------------------------------------------------------------------------
-# 10-K / 10-Q 링크
-# ----------------------------------------------------------------------------
-@app.get("/filing/10K")
-def get_10k(ticker: str):
-    cik = get_cik_by_ticker(ticker)
-    url = f"{BASE_EDGAR}?action=getcompany&CIK={cik}&type=10-K&owner=exclude&count=1"
-    return {"ticker": ticker, "type": "10-K", "url": url}
-
-@app.get("/filing/10Q")
-def get_10q(ticker: str):
-    cik = get_cik_by_ticker(ticker)
-    url = f"{BASE_EDGAR}?action=getcompany&CIK={cik}&type=10-Q&owner=exclude&count=1"
-    return {"ticker": ticker, "type": "10-Q", "url": url}
-
-# ----------------------------------------------------------------------------
-# XBRL 개별 Concept 조회
-# ----------------------------------------------------------------------------
-@app.get("/xbrl")
-def get_xbrl_concept(cik: str, concept: str):
-    cik = cik.zfill(10)
-    url = f"{BASE_SEC}/api/xbrl/company_concept/CIK{cik}/us-gaap/{concept}.json"
-    print(f"[DEBUG] Requesting SEC URL: {url}")
-    res = requests.get(url, headers=HEADERS)
-    print(f"[DEBUG] SEC Response Code: {res.status_code}")
-    if res.status_code == 200:
-        return res.json()
-    elif res.status_code == 403:
-        raise HTTPException(status_code=403, detail="SEC access denied (check User-Agent header).")
-    elif res.status_code == 404:
-        raise HTTPException(status_code=404, detail="XBRL concept not found.")
-    else:
-        raise HTTPException(status_code=res.status_code, detail=f"Unexpected SEC response: {res.text[:200]}")
-
-# ----------------------------------------------------------------------------
-# ✅ 회사 전체 재무 항목 (Company Facts) 나열
-# ----------------------------------------------------------------------------
-@app.get("/facts")
-def get_company_facts(cik: str):
-    """
-    기업이 SEC에 보고한 모든 XBRL 재무 항목을 그대로 나열.
-    (us-gaap, dei, srt 전체 포함)
-    """
-    cik = cik.zfill(10)
-    url = f"{BASE_SEC}/api/xbrl/company_facts/CIK{cik}.json"
-    print(f"[DEBUG] Fetching company facts: {url}")
-    res = requests.get(url, headers=HEADERS)
-
-    if res.status_code != 200:
-        raise HTTPException(status_code=res.status_code, detail="Failed to fetch company facts from SEC.")
-
-    data = res.json()
-    entity_name = data.get("entityName", "Unknown Entity")
-    facts = data.get("facts", {})
-
-    # 전체 계정명 추출
-    all_concepts = {}
-    for section, items in facts.items():
-        all_concepts[section] = list(items.keys())
-
-    return {
-        "entityName": entity_name,
-        "sections": list(all_concepts.keys()),
-        "total_sections": len(all_concepts),
-        "concepts": all_concepts
-    }
-
-# ----------------------------------------------------------------------------
-# HTML 문서 파서 (기존 유지)
-# ----------------------------------------------------------------------------
-@app.get("/extract")
-def extract_from_html(url: str):
-    """SEC 보고서(HTML)에서 주요 재무 데이터 자동 추출"""
-    try:
-        res = requests.get(url, headers=HEADERS)
-        res.raise_for_status()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to fetch document: {str(e)}")
-
-    soup = BeautifulSoup(res.text, "html.parser")
-    tables = soup.find_all("table")
-    data = {}
-
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
-            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
-            joined = " ".join(cells).lower()
-            if any(k in joined for k in ["revenue", "net income", "assets", "cash flow", "liabilities"]):
-                key = " | ".join(cells[:2])
-                val = cells[2:] if len(cells) > 2 else None
-                data[key] = val
-
-    return {"url": url, "extracted_items": data}
-
-# ----------------------------------------------------------------------------
-# Utilities
-# ----------------------------------------------------------------------------
-def get_cik_by_ticker(ticker: str) -> str:
+def search_company(q: str):
+    # 실제 운영시에는 SEC의 ticker.txt 또는 별도 DB 연결 권장
     mapping = {
-        "NVDA": "0001045810",
-        "AAPL": "0000320193",
-        "MSFT": "0000789019",
-        "AMZN": "0001018724"
+        "nvidia": {"name": "NVIDIA CORP", "ticker": "NVDA", "cik": "0001045810"},
+        "apple": {"name": "APPLE INC", "ticker": "AAPL", "cik": "0000320193"},
+        "tesla": {"name": "TESLA INC", "ticker": "TSLA", "cik": "0001318605"}
     }
-    return mapping.get(ticker.upper(), ticker)
+    result = mapping.get(q.lower())
+    if not result:
+        raise HTTPException(status_code=404, detail="Company not found in mock data")
+    return result
 
-# ----------------------------------------------------------------------------
-# Root Endpoint
-# ----------------------------------------------------------------------------
-@app.get("/")
-def root():
+# 2. 최신 공시 목록 확인 (10-K, 10-Q 리스트 제공)
+@app.get("/filings")
+def get_filings(cik: str):
+    padded_cik = cik.zfill(10)
+    url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
+    res = requests.get(url, headers=HEADERS)
+    data = res.json()
+    
+    recent_filings = data.get("filings", {}).get("recent", {})
+    filings_list = []
+    
+    # 10-K, 10-Q 필터링 (GPT가 사용자에게 선택지를 제시할 수 있도록 함)
+    for i, form in enumerate(recent_filings.get("form", [])):
+        if form in ["10-K", "10-Q"]:
+            filings_list.append({
+                "accessionNumber": recent_filings["accessionNumber"][i],
+                "reportDate": recent_filings["reportDate"][i],
+                "form": form,
+                "primaryDocument": recent_filings["primaryDocument"][i]
+            })
+    return {"entityName": data.get("entityName"), "filings": filings_list[:10]}
+
+# 3. 핵심: 특정 시점의 모든 원문 계정 항목 나열
+@app.get("/report/raw")
+def get_raw_report(cik: str, accessionNumber: str):
+    """
+    사용자가 선택한 보고서(accessionNumber)에 포함된 
+    모든 XBRL 계정 과목과 수치를 필터링 없이 그대로 반환합니다.
+    """
+    padded_cik = cik.zfill(10)
+    url = f"https://data.sec.gov/api/xbrl/company_facts/CIK{padded_cik}.json"
+    
+    res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        raise HTTPException(status_code=res.status_code, detail="SEC Data Fetch Failed")
+    
+    full_data = res.json()
+    acc_num_clean = accessionNumber.replace("-", "")
+    
+    raw_facts = {}
+    facts_data = full_data.get("facts", {})
+
+    # 모든 Taxonomy (us-gaap, dei 등)를 순회하며 해당 보고서 번호에 해당하는 수치만 추출
+    for taxonomy in facts_data:
+        for concept, details in facts_data[taxonomy].items():
+            units = details.get("units", {})
+            for unit_type in units:
+                for entry in units[unit_type]:
+                    # 사용자가 선택한 특정 보고서(accessionNumber)의 데이터만 필터링
+                    if entry.get("accn") == accessionNumber:
+                        if concept not in raw_facts:
+                            raw_facts[concept] = []
+                        raw_facts[concept].append({
+                            "val": entry.get("val"),
+                            "end": entry.get("end"),
+                            "frame": entry.get("frame", "N/A"),
+                            "unit": unit_type
+                        })
+    
     return {
-        "message": "SEC Financial API (Enhanced with Full Company Facts)",
-        "endpoints": [
-            "/search?q=",
-            "/company?cik=",
-            "/filing/10K?ticker=",
-            "/filing/10Q?ticker=",
-            "/xbrl?cik=&concept=",
-            "/facts?cik=",
-            "/extract?url="
-        ]
+        "entityName": full_data.get("entityName"),
+        "accessionNumber": accessionNumber,
+        "item_count": len(raw_facts),
+        "data": raw_facts
     }
