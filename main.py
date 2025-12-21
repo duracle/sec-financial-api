@@ -1,91 +1,100 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 import requests
-from typing import Optional
 
-app = FastAPI(title="SEC Raw Data Explorer", version="2.2")
+app = FastAPI(title="SEC Raw Data Explorer", version="2.5")
 
+# ✅ SEC가 요구하는 필수 헤더 (이메일 포함)
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; FinancialBot/1.0; +mailto:duracle@gmail.com)",
+    "User-Agent": "Individual Researcher (duracle@gmail.com)",
     "Accept-Encoding": "gzip, deflate",
     "Host": "data.sec.gov"
 }
 
-# 1. 기업 검색 및 CIK 획득
+# ----------------------------------------------------------------------------
+# 1. 기업 검색 (Ticker -> CIK)
+# ----------------------------------------------------------------------------
 @app.get("/search")
 def search_company(q: str):
-    # 실제 운영시에는 SEC의 ticker.txt 또는 별도 DB 연결 권장
+    # 실제로는 SEC의 ticker_to_cik JSON을 연동하는 것이 좋으나, 우선 Mock 데이터로 구현
     mapping = {
         "nvidia": {"name": "NVIDIA CORP", "ticker": "NVDA", "cik": "0001045810"},
         "apple": {"name": "APPLE INC", "ticker": "AAPL", "cik": "0000320193"},
-        "tesla": {"name": "TESLA INC", "ticker": "TSLA", "cik": "0001318605"}
+        "tesla": {"name": "TESLA INC", "ticker": "TSLA", "cik": "0001318605"},
+        "microsoft": {"name": "MICROSOFT CORP", "ticker": "MSFT", "cik": "0000789019"}
     }
-    result = mapping.get(q.lower())
-    if not result:
-        raise HTTPException(status_code=404, detail="Company not found in mock data")
-    return result
+    key = q.lower()
+    if key in mapping:
+        return mapping[key]
+    raise HTTPException(status_code=404, detail="Company not found. Please try Nvidia, Apple, etc.")
 
-# 2. 최신 공시 목록 확인 (10-K, 10-Q 리스트 제공)
+# ----------------------------------------------------------------------------
+# 2. 공시 목록 조회 (GPT가 사용자에게 10-K, 10-Q 선택지를 제시할 때 사용)
+# ----------------------------------------------------------------------------
 @app.get("/filings")
 def get_filings(cik: str):
     padded_cik = cik.zfill(10)
     url = f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
+    
     res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        raise HTTPException(status_code=res.status_code, detail="SEC submissions fetch failed.")
+    
     data = res.json()
+    recent = data.get("filings", {}).get("recent", {})
     
-    recent_filings = data.get("filings", {}).get("recent", {})
-    filings_list = []
-    
-    # 10-K, 10-Q 필터링 (GPT가 사용자에게 선택지를 제시할 수 있도록 함)
-    for i, form in enumerate(recent_filings.get("form", [])):
+    filings = []
+    for i, form in enumerate(recent.get("form", [])):
         if form in ["10-K", "10-Q"]:
-            filings_list.append({
-                "accessionNumber": recent_filings["accessionNumber"][i],
-                "reportDate": recent_filings["reportDate"][i],
+            filings.append({
+                "date": recent["reportDate"][i],
                 "form": form,
-                "primaryDocument": recent_filings["primaryDocument"][i]
+                "accessionNumber": recent["accessionNumber"][i], # 10K/10Q 고유 ID
+                "primaryDocument": recent["primaryDocument"][i]
             })
-    return {"entityName": data.get("entityName"), "filings": filings_list[:10]}
+    return {"entityName": data.get("entityName"), "filings": filings[:10]}
 
-# 3. 핵심: 특정 시점의 모든 원문 계정 항목 나열
+# ----------------------------------------------------------------------------
+# 3. 핵심: 원문 계정 항목 나열 (/report/raw)
+# ----------------------------------------------------------------------------
 @app.get("/report/raw")
 def get_raw_report(cik: str, accessionNumber: str):
     """
-    사용자가 선택한 보고서(accessionNumber)에 포함된 
-    모든 XBRL 계정 과목과 수치를 필터링 없이 그대로 반환합니다.
+    특정 보고서(accessionNumber)의 모든 XBRL 원문 데이터를 필터링 없이 가져옵니다.
     """
     padded_cik = cik.zfill(10)
     url = f"https://data.sec.gov/api/xbrl/company_facts/CIK{padded_cik}.json"
     
     res = requests.get(url, headers=HEADERS)
     if res.status_code != 200:
-        raise HTTPException(status_code=res.status_code, detail="SEC Data Fetch Failed")
+        raise HTTPException(status_code=res.status_code, detail="SEC facts fetch failed.")
     
     full_data = res.json()
-    acc_num_clean = accessionNumber.replace("-", "")
+    facts = full_data.get("facts", {})
     
-    raw_facts = {}
-    facts_data = full_data.get("facts", {})
+    output_data = {}
 
-    # 모든 Taxonomy (us-gaap, dei 등)를 순회하며 해당 보고서 번호에 해당하는 수치만 추출
-    for taxonomy in facts_data:
-        for concept, details in facts_data[taxonomy].items():
+    # 모든 Taxonomy(us-gaap, dei, srt 등)를 순회하며 해당 보고서 번호 데이터만 추출
+    for taxonomy in facts:
+        for concept, details in facts[taxonomy].items():
             units = details.get("units", {})
             for unit_type in units:
                 for entry in units[unit_type]:
-                    # 사용자가 선택한 특정 보고서(accessionNumber)의 데이터만 필터링
+                    # 사용자가 선택한 그 시점의 보고서(accessionNumber) 데이터만 매칭
                     if entry.get("accn") == accessionNumber:
-                        if concept not in raw_facts:
-                            raw_facts[concept] = []
-                        raw_facts[concept].append({
-                            "val": entry.get("val"),
-                            "end": entry.get("end"),
-                            "frame": entry.get("frame", "N/A"),
-                            "unit": unit_type
-                        })
+                        # 중복 방지를 위해 가장 최신 'end' 날짜 기준 혹은 'frame' 기준으로 저장
+                        output_data[concept] = {
+                            "value": entry.get("val"),
+                            "unit": unit_type,
+                            "end_date": entry.get("end"),
+                            "label": details.get("description", concept) # 원문 설명
+                        }
     
+    if not output_data:
+        raise HTTPException(status_code=404, detail="No data found for this specific report.")
+
     return {
         "entityName": full_data.get("entityName"),
-        "accessionNumber": accessionNumber,
-        "item_count": len(raw_facts),
-        "data": raw_facts
+        "reportID": accessionNumber,
+        "raw_items_count": len(output_data),
+        "items": output_data
     }
