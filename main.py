@@ -1,6 +1,6 @@
-# 📁 main.py
-# SEC Financial Data API (Enhanced Version with XBRL Parser)
-# Author: [Your Name]
+# main.py
+# SEC Financial API (Enhanced with XBRL Parser)
+# Author: duracle
 # Date: 2025-12-21
 
 from fastapi import FastAPI, HTTPException
@@ -13,9 +13,11 @@ app = FastAPI(
     version="2.0"
 )
 
-# ✅ SEC API 규정상 User-Agent 필수
+# ✅ SEC 공식 API 접근 허용용 User-Agent (반드시 이메일 포함)
 HEADERS = {
-    "User-Agent": "YourAppName contact@yourdomain.com"
+    "User-Agent": "sec-financial-api/1.0 (duracle@gmail.com)",
+    "Accept-Encoding": "gzip, deflate",
+    "Host": "data.sec.gov"
 }
 
 BASE_SEC = "https://data.sec.gov"
@@ -27,11 +29,14 @@ BASE_EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar"
 @app.get("/search")
 def search_companies(q: str):
     """기업명으로 SEC에서 검색"""
-    url = f"https://data.sec.gov/submissions/CIK0001045810.json"
-    res = requests.get(url, headers=HEADERS)
-    if res.status_code != 200:
-        raise HTTPException(status_code=400, detail="Search failed.")
-    return res.json()
+    try:
+        # 간단히 NVDA 예시용 (실제 구현은 SEC 검색 API로 교체 가능)
+        if q.lower() == "nvidia":
+            return {"company_name": "NVIDIA CORP", "ticker": "NVDA", "cik": "0001045810"}
+        else:
+            return {"detail": f"No mock data for query {q}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ----------------------------------------------------------------------------
 # 2️⃣ COMPANY INFO
@@ -69,13 +74,22 @@ def get_10q(ticker: str):
 def get_xbrl_concept(cik: str, concept: str):
     """
     SEC XBRL JSON API에서 특정 재무 항목 불러오기
-    예: Revenues, NetIncomeLoss, Assets, CashAndCashEquivalentsAtCarryingValue
+    예: Revenues, NetIncomeLoss, Assets 등
     """
-    url = f"{BASE_SEC}/api/xbrl/company_concept/CIK{cik.zfill(10)}/us-gaap/{concept}.json"
+    cik = cik.zfill(10)
+    url = f"{BASE_SEC}/api/xbrl/company_concept/CIK{cik}/us-gaap/{concept}.json"
+    print(f"[DEBUG] Requesting SEC URL: {url}")  # ✅ 디버그 로그 추가
     res = requests.get(url, headers=HEADERS)
-    if res.status_code != 200:
+
+    print(f"[DEBUG] SEC Response Code: {res.status_code}")  # ✅ 상태코드 확인
+    if res.status_code == 200:
+        return res.json()
+    elif res.status_code == 403:
+        raise HTTPException(status_code=403, detail="SEC access denied (check User-Agent header).")
+    elif res.status_code == 404:
         raise HTTPException(status_code=404, detail="XBRL concept not found.")
-    return res.json()
+    else:
+        raise HTTPException(status_code=res.status_code, detail=f"Unexpected SEC response: {res.text[:200]}")
 
 # ----------------------------------------------------------------------------
 # 5️⃣ HTML 문서 파서 (XBRL이 아닌 HTML 보고서에서 직접 데이터 추출)
@@ -103,7 +117,9 @@ def extract_from_html(url: str):
 
             # 주요 재무 항목 탐지
             if any(k in joined for k in ["revenue", "net income", "assets", "cash flow", "liabilities"]):
-                data[" | ".join(cells[:2])] = cells[2:] if len(cells) > 2 else None
+                key = " | ".join(cells[:2])
+                val = cells[2:] if len(cells) > 2 else None
+                data[key] = val
 
     return {"url": url, "extracted_items": data}
 
@@ -111,7 +127,7 @@ def extract_from_html(url: str):
 # 6️⃣ UTILITIES
 # ----------------------------------------------------------------------------
 def get_cik_by_ticker(ticker: str) -> str:
-    """티커 → CIK 변환 (샘플용, 실제 구현 시 로컬 DB or SEC mapping 사용 권장)"""
+    """티커 → CIK 변환"""
     mapping = {
         "NVDA": "0001045810",
         "AAPL": "0000320193",
@@ -121,7 +137,7 @@ def get_cik_by_ticker(ticker: str) -> str:
     return mapping.get(ticker.upper(), "0001045810")
 
 # ----------------------------------------------------------------------------
-# 7️⃣ ROOT
+# 7️⃣ ROOT ENDPOINT
 # ----------------------------------------------------------------------------
 @app.get("/")
 def root():
