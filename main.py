@@ -243,10 +243,7 @@ async def get_10q(ticker: str):
     """특정 티커의 최신 10-Q 파일링 조회"""
     return await get_filing(ticker, "10-Q")
 
-@app.get("/openapi.json")
-async def get_openapi_schema():
-    """GPTs Action용 OpenAPI 스키마"""
-    return app.openapi()
+# OpenAPI는 FastAPI가 자동으로 /openapi.json에서 제공
 
 if __name__ == "__main__":
     import uvicorn
