@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-from typing import Optional
+from typing import Optional, List
 import re
 from datetime import datetime
 
@@ -25,6 +25,34 @@ HEADERS = {
     'User-Agent': 'SEC Financial API contact@example.com'
 }
 
+def search_companies(query: str) -> List[dict]:
+    """기업명으로 회사 검색"""
+    try:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        
+        companies = response.json()
+        query_lower = query.lower()
+        results = []
+        
+        for company in companies.values():
+            company_name = company['title'].lower()
+            ticker = company['ticker']
+            
+            # 기업명 또는 티커에 검색어 포함 시 결과에 추가
+            if query_lower in company_name or query_lower in ticker.lower():
+                results.append({
+                    "company_name": company['title'],
+                    "ticker": ticker,
+                    "cik": str(company['cik_str']).zfill(10)
+                })
+        
+        return results[:10]  # 상위 10개만 반환
+    except Exception as e:
+        print(f"Error searching companies: {e}")
+        return []
+
 def get_cik_from_ticker(ticker: str) -> Optional[str]:
     """티커 심볼로 CIK 번호 조회"""
     try:
@@ -37,7 +65,6 @@ def get_cik_from_ticker(ticker: str) -> Optional[str]:
         
         for company in companies.values():
             if company['ticker'] == ticker_upper:
-                # CIK를 10자리로 패딩
                 return str(company['cik_str']).zfill(10)
         
         return None
@@ -45,10 +72,45 @@ def get_cik_from_ticker(ticker: str) -> Optional[str]:
         print(f"Error getting CIK: {e}")
         return None
 
+def get_company_info(cik: str) -> dict:
+    """CIK로 회사 상세 정보 및 세그먼트 조회"""
+    try:
+        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # 비즈니스 세그먼트 정보 (최근 10-K에서 추출)
+        filings = data.get('filings', {}).get('recent', {})
+        segments = []
+        
+        # SIC 코드 기반 산업 정보
+        sic = data.get('sic', 'N/A')
+        sic_description = data.get('sicDescription', 'N/A')
+        
+        return {
+            "company_name": data.get('name', 'N/A'),
+            "cik": cik,
+            "ticker": data.get('tickers', ['N/A'])[0] if data.get('tickers') else 'N/A',
+            "sic": sic,
+            "industry": sic_description,
+            "fiscal_year_end": data.get('fiscalYearEnd', 'N/A'),
+            "state_of_incorporation": data.get('stateOfIncorporation', 'N/A'),
+            "business_address": {
+                "street": data.get('addresses', {}).get('business', {}).get('street1', 'N/A'),
+                "city": data.get('addresses', {}).get('business', {}).get('city', 'N/A'),
+                "state": data.get('addresses', {}).get('business', {}).get('stateOrCountry', 'N/A'),
+                "zip": data.get('addresses', {}).get('business', {}).get('zipCode', 'N/A')
+            }
+        }
+    except Exception as e:
+        print(f"Error getting company info: {e}")
+        return None
+
 def get_latest_filing(cik: str, form_type: str) -> dict:
     """최신 10-K 또는 10-Q 파일링 조회"""
     try:
-        # SEC EDGAR submissions API
         url = f"https://data.sec.gov/submissions/CIK{cik}.json"
         response = requests.get(url, headers=HEADERS)
         response.raise_for_status()
@@ -88,12 +150,64 @@ async def root():
     return {
         "message": "SEC Financial Data API",
         "endpoints": {
+            "/search": "Search companies by name or ticker",
+            "/company/{cik_or_ticker}": "Get company details",
             "/filing/{ticker}": "Get latest 10-K or 10-Q for a ticker",
             "/10k/{ticker}": "Get latest 10-K filing",
             "/10q/{ticker}": "Get latest 10-Q filing",
             "/docs": "OpenAPI documentation"
         }
     }
+
+@app.get("/search")
+async def search_company(q: str):
+    """
+    기업명 또는 티커로 회사 검색
+    
+    Parameters:
+    - q: 검색어 (회사명 또는 티커)
+    
+    Returns:
+    - 매칭되는 회사 목록 (최대 10개)
+    """
+    if not q or len(q) < 2:
+        raise HTTPException(status_code=400, detail="Query must be at least 2 characters")
+    
+    results = search_companies(q)
+    
+    if not results:
+        raise HTTPException(status_code=404, detail=f"No companies found for '{q}'")
+    
+    return {
+        "query": q,
+        "count": len(results),
+        "results": results
+    }
+
+@app.get("/company/{identifier}")
+async def get_company(identifier: str):
+    """
+    CIK 또는 티커로 회사 상세 정보 조회
+    
+    Parameters:
+    - identifier: CIK 번호 또는 티커 심볼
+    
+    Returns:
+    - 회사명, CIK, 티커, 산업 분류, 세그먼트 등
+    """
+    # 숫자면 CIK, 아니면 티커로 간주
+    if identifier.isdigit():
+        cik = identifier.zfill(10)
+    else:
+        cik = get_cik_from_ticker(identifier)
+        if not cik:
+            raise HTTPException(status_code=404, detail=f"Ticker '{identifier}' not found")
+    
+    company_info = get_company_info(cik)
+    if not company_info:
+        raise HTTPException(status_code=404, detail=f"Company information not found")
+    
+    return company_info
 
 @app.get("/filing/{ticker}")
 async def get_filing(ticker: str, form_type: Optional[str] = "10-K"):
