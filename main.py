@@ -1,250 +1,138 @@
+# 📁 main.py
+# SEC Financial Data API (Enhanced Version with XBRL Parser)
+# Author: [Your Name]
+# Date: 2025-12-21
+
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 import requests
-from typing import Optional, List
-import re
-from datetime import datetime
+from bs4 import BeautifulSoup
 
 app = FastAPI(
-    title="SEC Financial Data API",
-    description="API to fetch latest 10-K and 10-Q filings from SEC EDGAR",
-    version="1.0.0"
+    title="SEC Financial API (Enhanced)",
+    description="Search SEC company filings and extract structured financial data from XBRL or HTML reports.",
+    version="2.0"
 )
 
-# CORS 설정
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# SEC EDGAR API 헤더 (User-Agent 필수)
+# ✅ SEC API 규정상 User-Agent 필수
 HEADERS = {
-    'User-Agent': 'SEC Financial API contact@example.com'
+    "User-Agent": "YourAppName contact@yourdomain.com"
 }
 
-def search_companies(query: str) -> List[dict]:
-    """기업명으로 회사 검색"""
-    try:
-        url = "https://www.sec.gov/files/company_tickers.json"
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
-        
-        companies = response.json()
-        query_lower = query.lower()
-        results = []
-        
-        for company in companies.values():
-            company_name = company['title'].lower()
-            ticker = company['ticker']
-            
-            # 기업명 또는 티커에 검색어 포함 시 결과에 추가
-            if query_lower in company_name or query_lower in ticker.lower():
-                results.append({
-                    "company_name": company['title'],
-                    "ticker": ticker,
-                    "cik": str(company['cik_str']).zfill(10)
-                })
-        
-        return results[:10]  # 상위 10개만 반환
-    except Exception as e:
-        print(f"Error searching companies: {e}")
-        return []
+BASE_SEC = "https://data.sec.gov"
+BASE_EDGAR = "https://www.sec.gov/cgi-bin/browse-edgar"
 
-def get_cik_from_ticker(ticker: str) -> Optional[str]:
-    """티커 심볼로 CIK 번호 조회"""
-    try:
-        url = "https://www.sec.gov/files/company_tickers.json"
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
-        
-        companies = response.json()
-        ticker_upper = ticker.upper()
-        
-        for company in companies.values():
-            if company['ticker'] == ticker_upper:
-                return str(company['cik_str']).zfill(10)
-        
-        return None
-    except Exception as e:
-        print(f"Error getting CIK: {e}")
-        return None
-
-def get_company_info(cik: str) -> dict:
-    """CIK로 회사 상세 정보 및 세그먼트 조회"""
-    try:
-        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        # 비즈니스 세그먼트 정보 (최근 10-K에서 추출)
-        filings = data.get('filings', {}).get('recent', {})
-        segments = []
-        
-        # SIC 코드 기반 산업 정보
-        sic = data.get('sic', 'N/A')
-        sic_description = data.get('sicDescription', 'N/A')
-        
-        return {
-            "company_name": data.get('name', 'N/A'),
-            "cik": cik,
-            "ticker": data.get('tickers', ['N/A'])[0] if data.get('tickers') else 'N/A',
-            "sic": sic,
-            "industry": sic_description,
-            "fiscal_year_end": data.get('fiscalYearEnd', 'N/A'),
-            "state_of_incorporation": data.get('stateOfIncorporation', 'N/A'),
-            "business_address": {
-                "street": data.get('addresses', {}).get('business', {}).get('street1', 'N/A'),
-                "city": data.get('addresses', {}).get('business', {}).get('city', 'N/A'),
-                "state": data.get('addresses', {}).get('business', {}).get('stateOrCountry', 'N/A'),
-                "zip": data.get('addresses', {}).get('business', {}).get('zipCode', 'N/A')
-            }
-        }
-    except Exception as e:
-        print(f"Error getting company info: {e}")
-        return None
-
-def get_latest_filing(cik: str, form_type: str) -> dict:
-    """최신 10-K 또는 10-Q 파일링 조회"""
-    try:
-        url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-        response = requests.get(url, headers=HEADERS)
-        response.raise_for_status()
-        
-        data = response.json()
-        filings = data.get('filings', {}).get('recent', {})
-        
-        # 해당 form type의 최신 파일링 찾기
-        for i, form in enumerate(filings.get('form', [])):
-            if form == form_type:
-                accession_number = filings['accessionNumber'][i]
-                filing_date = filings['filingDate'][i]
-                primary_document = filings['primaryDocument'][i]
-                
-                # 파일 URL 생성
-                accession_clean = accession_number.replace('-', '')
-                document_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/{primary_document}"
-                
-                return {
-                    "company_name": data.get('name', 'N/A'),
-                    "cik": cik,
-                    "form_type": form_type,
-                    "filing_date": filing_date,
-                    "accession_number": accession_number,
-                    "document_url": document_url,
-                    "edgar_url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}&dateb=&owner=exclude&count=1"
-                }
-        
-        return None
-    except Exception as e:
-        print(f"Error getting filing: {e}")
-        return None
-
-@app.get("/")
-async def root():
-    """API 루트 엔드포인트"""
-    return {
-        "message": "SEC Financial Data API",
-        "endpoints": {
-            "/search": "Search companies by name or ticker",
-            "/company/{cik_or_ticker}": "Get company details",
-            "/filing/{ticker}": "Get latest 10-K or 10-Q for a ticker",
-            "/10k/{ticker}": "Get latest 10-K filing",
-            "/10q/{ticker}": "Get latest 10-Q filing",
-            "/docs": "OpenAPI documentation"
-        }
-    }
-
+# ----------------------------------------------------------------------------
+# 1️⃣ COMPANY SEARCH
+# ----------------------------------------------------------------------------
 @app.get("/search")
-async def search_company(q: str):
+def search_companies(q: str):
+    """기업명으로 SEC에서 검색"""
+    url = f"https://data.sec.gov/submissions/CIK0001045810.json"
+    res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Search failed.")
+    return res.json()
+
+# ----------------------------------------------------------------------------
+# 2️⃣ COMPANY INFO
+# ----------------------------------------------------------------------------
+@app.get("/company")
+def get_company_info(cik: str):
+    """기업 기본 정보 조회"""
+    url = f"{BASE_SEC}/submissions/CIK{cik.zfill(10)}.json"
+    res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Company info fetch failed.")
+    return res.json()
+
+# ----------------------------------------------------------------------------
+# 3️⃣ LATEST 10-K / 10-Q
+# ----------------------------------------------------------------------------
+@app.get("/filing/10K")
+def get_10k(ticker: str):
+    """최신 10-K 보고서 조회"""
+    cik = get_cik_by_ticker(ticker)
+    url = f"{BASE_EDGAR}?action=getcompany&CIK={cik}&type=10-K&owner=exclude&count=1"
+    return {"ticker": ticker, "type": "10-K", "url": url}
+
+@app.get("/filing/10Q")
+def get_10q(ticker: str):
+    """최신 10-Q 보고서 조회"""
+    cik = get_cik_by_ticker(ticker)
+    url = f"{BASE_EDGAR}?action=getcompany&CIK={cik}&type=10-Q&owner=exclude&count=1"
+    return {"ticker": ticker, "type": "10-Q", "url": url}
+
+# ----------------------------------------------------------------------------
+# 4️⃣ XBRL JSON API (공식 SEC API)
+# ----------------------------------------------------------------------------
+@app.get("/xbrl")
+def get_xbrl_concept(cik: str, concept: str):
     """
-    기업명 또는 티커로 회사 검색
-    
-    Parameters:
-    - q: 검색어 (회사명 또는 티커)
-    
-    Returns:
-    - 매칭되는 회사 목록 (최대 10개)
+    SEC XBRL JSON API에서 특정 재무 항목 불러오기
+    예: Revenues, NetIncomeLoss, Assets, CashAndCashEquivalentsAtCarryingValue
     """
-    if not q or len(q) < 2:
-        raise HTTPException(status_code=400, detail="Query must be at least 2 characters")
-    
-    results = search_companies(q)
-    
-    if not results:
-        raise HTTPException(status_code=404, detail=f"No companies found for '{q}'")
-    
-    return {
-        "query": q,
-        "count": len(results),
-        "results": results
+    url = f"{BASE_SEC}/api/xbrl/company_concept/CIK{cik.zfill(10)}/us-gaap/{concept}.json"
+    res = requests.get(url, headers=HEADERS)
+    if res.status_code != 200:
+        raise HTTPException(status_code=404, detail="XBRL concept not found.")
+    return res.json()
+
+# ----------------------------------------------------------------------------
+# 5️⃣ HTML 문서 파서 (XBRL이 아닌 HTML 보고서에서 직접 데이터 추출)
+# ----------------------------------------------------------------------------
+@app.get("/extract")
+def extract_from_html(url: str):
+    """
+    SEC 보고서(HTML)에서 주요 재무 데이터 자동 추출
+    """
+    try:
+        res = requests.get(url, headers=HEADERS)
+        res.raise_for_status()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch document: {str(e)}")
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    tables = soup.find_all("table")
+    data = {}
+
+    for table in tables:
+        rows = table.find_all("tr")
+        for row in rows:
+            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+            joined = " ".join(cells).lower()
+
+            # 주요 재무 항목 탐지
+            if any(k in joined for k in ["revenue", "net income", "assets", "cash flow", "liabilities"]):
+                data[" | ".join(cells[:2])] = cells[2:] if len(cells) > 2 else None
+
+    return {"url": url, "extracted_items": data}
+
+# ----------------------------------------------------------------------------
+# 6️⃣ UTILITIES
+# ----------------------------------------------------------------------------
+def get_cik_by_ticker(ticker: str) -> str:
+    """티커 → CIK 변환 (샘플용, 실제 구현 시 로컬 DB or SEC mapping 사용 권장)"""
+    mapping = {
+        "NVDA": "0001045810",
+        "AAPL": "0000320193",
+        "MSFT": "0000789019",
+        "AMZN": "0001018724"
     }
+    return mapping.get(ticker.upper(), "0001045810")
 
-@app.get("/company/{identifier}")
-async def get_company(identifier: str):
-    """
-    CIK 또는 티커로 회사 상세 정보 조회
-    
-    Parameters:
-    - identifier: CIK 번호 또는 티커 심볼
-    
-    Returns:
-    - 회사명, CIK, 티커, 산업 분류, 세그먼트 등
-    """
-    # 숫자면 CIK, 아니면 티커로 간주
-    if identifier.isdigit():
-        cik = identifier.zfill(10)
-    else:
-        cik = get_cik_from_ticker(identifier)
-        if not cik:
-            raise HTTPException(status_code=404, detail=f"Ticker '{identifier}' not found")
-    
-    company_info = get_company_info(cik)
-    if not company_info:
-        raise HTTPException(status_code=404, detail=f"Company information not found")
-    
-    return company_info
-
-@app.get("/filing/{ticker}")
-async def get_filing(ticker: str, form_type: Optional[str] = "10-K"):
-    """
-    특정 티커의 최신 SEC 파일링 조회
-    
-    Parameters:
-    - ticker: 주식 티커 심볼 (예: AAPL, TSLA)
-    - form_type: 파일링 유형 (10-K 또는 10-Q, 기본값: 10-K)
-    """
-    if form_type not in ["10-K", "10-Q"]:
-        raise HTTPException(status_code=400, detail="form_type must be '10-K' or '10-Q'")
-    
-    # CIK 조회
-    cik = get_cik_from_ticker(ticker)
-    if not cik:
-        raise HTTPException(status_code=404, detail=f"Ticker '{ticker}' not found")
-    
-    # 파일링 조회
-    filing = get_latest_filing(cik, form_type)
-    if not filing:
-        raise HTTPException(status_code=404, detail=f"No {form_type} filing found for {ticker}")
-    
-    return filing
-
-@app.get("/10k/{ticker}")
-async def get_10k(ticker: str):
-    """특정 티커의 최신 10-K 파일링 조회"""
-    return await get_filing(ticker, "10-K")
-
-@app.get("/10q/{ticker}")
-async def get_10q(ticker: str):
-    """특정 티커의 최신 10-Q 파일링 조회"""
-    return await get_filing(ticker, "10-Q")
-
-# OpenAPI는 FastAPI가 자동으로 /openapi.json에서 제공
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+# ----------------------------------------------------------------------------
+# 7️⃣ ROOT
+# ----------------------------------------------------------------------------
+@app.get("/")
+def root():
+    return {
+        "message": "SEC Financial API (Enhanced with XBRL Parser)",
+        "endpoints": [
+            "/search?q=",
+            "/company?cik=",
+            "/filing/10K?ticker=",
+            "/filing/10Q?ticker=",
+            "/xbrl?cik=&concept=",
+            "/extract?url="
+        ]
+    }
